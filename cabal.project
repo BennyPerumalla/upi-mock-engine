@@ -1,0 +1,11 @@
+packages: .
+
+-- Reproducibility: pin the Hackage index. Bump deliberately, in its own commit,
+-- with the freeze file regenerated (see CONTRIBUTING.md § Dependency policy).
+index-state: hackage.haskell.org 2026-08-01T00:00:00Z
+
+tests: True
+benchmarks: False
+
+package upi-mock-engine
+  ghc-options: -fwrite-ide-info -hiedir=.hie

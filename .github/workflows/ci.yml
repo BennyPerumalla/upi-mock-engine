@@ -1,0 +1,143 @@
+# The gate described in CONTRIBUTING.md § Non-negotiables, run per push.
+#
+# `make ci` is fmt-check + lint + build + test, and this workflow is that split
+# across jobs so a formatting failure does not hide behind a ten-minute build.
+# flake.nix is authoritative for tool *versions*: a fourmolu or hlint version here
+# that disagrees with the shell shows up as a diff on files the author never
+# touched, which is the confusing failure this comment exists to shorten.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A force-push supersedes its own in-flight run. `main` is exempt: those runs are
+# what release tags are cut from.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  GHC_VERSION: '9.10.3'
+  CABAL_VERSION: '3.12.1.0'
+
+jobs:
+  format:
+    name: fourmolu --mode check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/run-fourmolu@v11
+        with:
+          version: '0.16.2.0'
+          pattern: |
+            app/**/*.hs
+            src/**/*.hs
+            test/**/*.hs
+
+  lint:
+    name: hlint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: haskell-actions/hlint-setup@v2
+        with:
+          version: '3.8'
+      # .hlint.yaml bans the partial functions outright, so a hit here is a defect
+      # rather than a suggestion. `--` promotes every hint to a failure.
+      - uses: haskell-actions/hlint-run@v2
+        with:
+          path: '["app/", "src/", "test/"]'
+          fail-on: suggestion
+
+  build:
+    name: GHC ${{ matrix.ghc }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+        ghc: ['9.10.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        id: setup
+        with:
+          ghc-version: ${{ matrix.ghc }}
+          cabal-version: ${{ env.CABAL_VERSION }}
+
+      # package.yaml is the source of truth and the .cabal file is git-ignored, so
+      # there is nothing to build until hpack has run. Pinned, because hpack's
+      # output changes between versions and a diff in generated output is noise.
+      - name: Generate the cabal file
+        run: |
+          cabal install hpack-0.37.0 --overwrite-policy=always --install-method=copy
+          hpack --force
+          test -f upi-mock-engine.cabal
+
+      # cabal.project pins index-state, so the plan is a function of the checkout.
+      # Keying the cache on the plan means a dependency bump invalidates it and
+      # nothing else does.
+      - name: Resolve the build plan
+        run: cabal build all --dry-run --enable-tests
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-ghc${{ matrix.ghc }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-ghc${{ matrix.ghc }}-
+
+      - name: Build dependencies
+        run: cabal build all --enable-tests --only-dependencies
+
+      # -Werror is applied here rather than in package.yaml: a warning must not stop
+      # a contributor mid-edit, and must stop a merge. Only this package's own
+      # modules are affected.
+      - name: Build
+        run: cabal build all --enable-tests --ghc-options=-Werror
+
+      - name: Test
+        run: cabal test all --enable-tests --test-show-details=direct --ghc-options=-Werror
+
+      # The document is a published contract (ADR 0005) and this is the only check
+      # that it can be produced without a server at all.
+      - name: Dump the OpenAPI document
+        run: |
+          cabal run -v0 upi-mock-engine -- openapi -o openapi.json
+          python3 -c "import json,sys; d=json.load(open('openapi.json')); \
+            assert d['openapi'].startswith('3.'), d['openapi']; \
+            print(len(d['paths']), 'paths', len(d['components']['schemas']), 'schemas')"
+
+      # extra-source-files globs docs/adr/*.md. A sdist is the only thing that
+      # notices when a declared glob matches nothing.
+      - name: Package
+        run: cabal sdist all
+
+      - if: matrix.os == 'ubuntu-24.04'
+        name: Upload the document
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi.json
+          path: openapi.json
+
+  nix:
+    name: nix develop
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      # Proves the reproducible path still resolves, and that the shell's ghc is the
+      # version CONTRIBUTING.md claims. Building the package under Nix is a separate,
+      # slower concern; `nix flake check` is the gate on the flake itself.
+      - run: nix flake check --no-build
+      - run: nix develop --command ghc --version
+      - run: nix develop --command hpack --version

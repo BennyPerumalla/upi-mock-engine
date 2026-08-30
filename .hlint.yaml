@@ -1,0 +1,50 @@
+- arguments: [--color=never]
+
+# Partial functions are rejected outright: this process models money.
+#
+# Stated as `restrict` rules rather than as custom `lhs`/`rhs` hints on purpose.
+# Restrictions resolve a name through the module's import list, so
+# `Prelude.head` does not fire on `Data.List.NonEmpty.head` — which is total, and
+# which `Infrastructure.Database` and three specs use. Custom hints match modulo
+# qualification and would reject all of them.
+- functions:
+    - {name: Prelude.head,        within: []}
+    - {name: Prelude.tail,        within: []}
+    - {name: Prelude.init,        within: []}
+    - {name: Prelude.last,        within: []}
+    - {name: Prelude.read,        within: []}
+    # Exempt in exactly one module. A test fixture that stops parsing must abort
+    # the suite as loudly as possible rather than silently degrade to a default,
+    # and UPIMock.Support.SimSpec asserts that every fixture still parses, so the
+    # exemption cannot mask a real defect.
+    - {name: Prelude.error,       within: [UPIMock.Support.Sim]}
+    - {name: Prelude.undefined,   within: []}
+    - {name: Data.Maybe.fromJust, within: []}
+    - {name: unsafeCoerce,        within: []}
+    - {name: unsafePerformIO,     within: []}
+
+# Lazy state accumulation in a projection fold is a space leak, not a style nit.
+- functions:
+    - {name: Data.Map.Lazy.insertWith, within: []}
+    - {name: Control.Monad.State.Lazy.modify, within: []}
+
+- extensions:
+    - default: true
+    - {name: [CPP, TemplateHaskell, QuasiQuotes], within: []}
+
+- ignore: {name: "Use if"}
+
+# hspec's `it "..." $ do` reads better than the point-free alternative even when
+# the block holds one statement. Listed per module rather than globally so the
+# rule keeps its teeth in src/.
+- ignore:
+    name: "Redundant do"
+    within:
+      - Spec
+      - UPIMock.API.RoutesSpec
+      - UPIMock.API.WireSpec
+      - UPIMock.Application.ServiceSpec
+      - UPIMock.Domain.EventsSpec
+      - UPIMock.Domain.TypesSpec
+      - UPIMock.Engine.StateMachineSpec
+      - UPIMock.Support.SimSpec
